@@ -1,0 +1,579 @@
+---
+title: "MGMT gene methylation -- Cell line panel"
+author: "O. Celiku"
+date: '`r format(Sys.time(), "%b %d %X %Y")`'
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+## for high resolution set dpi to 300
+knitr::opts_chunk$set(echo = FALSE,
+                      warning=FALSE,
+                      message=FALSE,
+                      dpi=100)
+data_dir <- file.path("data")
+```
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(ComplexHeatmap)
+library(kableExtra)
+library(ggpubr)
+library(circlize)
+library(viridis)
+library(drc)
+library(ggrepel)
+
+# custom color palettes
+palette <- viridis::turbo(2, begin =0.15, end = 0.9, direction = 1)
+palette3 <- viridis::turbo(2, begin =0.15, end = 0.9, direction = 1)
+palette3 <- c(palette3[2],viridis::viridis(1),palette3[1])
+```
+
+
+### Descriptive landscape
+
+First an overview of overall similarity and difference of the cell lines, showing promoter associated probes and others considered as body probes, and split by IDH-mutation status. 
+
+```{r}
+meth <- read_csv(file.path(data_dir, "Cellline_MGMT_meth.csv"))
+pheno <- read_csv(file.path(data_dir, "Cellline_pheno_MGMT_mRNA.csv")) %>% mutate(IDH_status=factor(IDH_status, levels=c("IDH-wild-type","IDH-mutant")))
+cells <- pheno %>% filter(carmustine_tested) %>% dplyr::pull(sample)
+```
+
+```{r, fig.width=10, fig.height=3, eval=TRUE}
+long <- meth %>% filter((promoter==FALSE) | (island=="Island" & promoter==TRUE)) %>% 
+  pivot_longer(!c(probe, island, group, promoter), names_to = "sample", values_to = "value") %>% group_by(sample, island, group, promoter) %>% dplyr::summarize(methylation=mean(value, na.rm = TRUE)) %>% ungroup()
+
+long <- long %>% left_join(pheno) %>% 
+  transmute(sample, IDH=IDH_status, 
+            region=factor(ifelse(promoter==TRUE, "promoter","body"), levels=c("promoter","body")), 
+            methylation, mRNA=MGMT_mRNA) %>% 
+  group_by(sample, IDH, region,  mRNA) %>% 
+  dplyr::summarize(methylation = mean(methylation, na.rm=TRUE)) 
+
+wide <- long %>% pivot_wider(names_from=region, values_from=methylation)
+```
+
+```{r, fig.width=3.5, fig.height=3.5, include=FALSE}
+# this chunk is used to get the clustering order for samples, so that they can be displayed in the prettier version below
+col_fun = colorRamp2(c(0, 0.5, 1), c(palette[1], "white", palette[2]))
+m <- as.matrix(meth[,pheno$sample])
+m.ann <- meth %>% 
+  dplyr::select(probe, promoter) %>% 
+  mutate(region=factor(ifelse(promoter==TRUE, "promoter", "body"), levels=c("promoter","body")))
+rownames(m) <-meth$probe
+colnames(m) <- unname(sapply(colnames(m), function(x) ifelse(x%in%cells,x, "")))
+p.ordered <- Heatmap(t(m), 
+             row_split = pheno$IDH_status,
+             cluster_row_slices = FALSE,
+             cluster_rows = TRUE, 
+             show_row_dend = FALSE,  
+             show_row_names = TRUE, 
+             row_names_gp =gpar(fontsize=8),
+             column_split = m.ann$region, 
+             cluster_column_slices = FALSE,
+             cluster_columns = TRUE,
+             show_column_dend = FALSE,
+             show_column_names = FALSE, 
+             column_names_gp = gpar(fontsize = 8), 
+             heatmap_legend_param = list(title="methylation"), col=col_fun)
+ht <- draw(p.ordered)
+rows <- c(row_order(ht)[[1]], row_order(ht)[[2]]) 
+columns <- c(column_order(ht)[[1]], column_order(ht)[[2]]) 
+```
+```{r, fig.width=4, fig.height=4}
+# use specific order of rows but allow columns to cluster for prettier display
+m.ordered <- m[columns,rows]
+ha = rowAnnotation(foo = anno_mark(at = which(!(colnames(m.ordered) %in% c(""))), labels = setdiff(colnames(m.ordered),c(""))))
+p <- Heatmap(t(m.ordered), 
+             row_split = pheno$IDH_status[rows],
+             cluster_row_slices = FALSE,
+             show_row_dend = FALSE,  
+             show_row_names = FALSE, 
+             cluster_rows = FALSE,
+             column_split = m.ann$region[columns], 
+             cluster_column_slices = FALSE, 
+             show_column_dend = FALSE,
+             show_column_names = FALSE, 
+             cluster_columns = TRUE,
+             heatmap_legend_param = list(title="methylation"), col=col_fun,
+             right_annotation = ha)
+p
+```
+```{r, fig.height=3, fig.width=1.2}
+p <- ggplot(long %>% filter(IDH=='IDH-wild-type') %>% unique() %>% arrange(desc(mRNA),sample),
+            aes(x=mRNA,y=reorder(sample,mRNA))) +
+  geom_bar(stat="identity", fill=palette3[3],width = 0.6) + theme_minimal() +
+  theme(axis.text=element_text(size=8), axis.title.x=element_text(size=10)) + 
+  ylab("IDH-wild-type") +  xlim(0,6)
+p
+```
+```{r, fig.height=1.8, fig.width=1.2}
+p <- ggplot(long %>% filter(IDH=='IDH-mutant') %>% unique() %>% arrange(desc(mRNA),sample),
+            aes(x=mRNA,y=reorder(sample,mRNA))) +
+  geom_bar(stat="identity", fill=palette3[3],width = 0.6) + theme_minimal() +
+  theme(axis.text=element_text(size=8), axis.title.x=element_text(size=10)) + 
+  ylab("IDH-mutant") + xlim(0,6)
+p
+```
+
+### IDH status and associations of region methylation with mRNA
+
+
+
+#### IDH-wild-type panel:
+
+```{r, fig.width=2.5, fig.height=2.2}
+p <- ggplot(wide%>%filter(IDH=="IDH-wild-type"),aes(body, promoter)) +
+  geom_point(size=1.2) +
+  stat_smooth(method = "lm", level=0.95) + 
+  theme_minimal() 
+p + stat_cor(label.x = 0.1, label.y = 0.1, p.accuracy = 0.001, r.digits = 2) 
+```
+```{r,fig.width=5, fig.height=2.2}
+p <- ggplot(long%>%filter(IDH=="IDH-wild-type"),aes(mRNA, methylation)) +
+  geom_point(aes(group=region, color=region), size=1.2) +
+  stat_smooth(aes(group=region), method = "lm", level=0.95) + theme_minimal()  +
+  facet_wrap(~region) +
+  scale_color_manual(values=palette) +
+  theme(strip.text.x = element_blank()) 
+p + stat_cor(label.x = 0, label.y = 1, p.accuracy = 0.001, r.digits = 2) 
+```
+
+Regression model without interaction; IDH-wild-type cells:
+
+```{r}
+model <- lm(mRNA ~ promoter+body, data = wide %>% filter(IDH=="IDH-wild-type"))
+summary(model)
+```
+
+Regression model with interaction; IDH-wild-type cells:
+
+```{r}
+model <- lm(mRNA ~ promoter*body, data = wide %>% filter(IDH=="IDH-wild-type"))
+summary(model)
+```
+
+
+#### IDH-mutant panel:
+
+```{r, fig.width=2.5, fig.height=2.2}
+p <- ggplot(wide%>%filter(IDH=="IDH-mutant"),aes(body, promoter)) +
+  geom_point(size=1.2) +
+  stat_smooth(method = "lm", level=0.95) + 
+  theme_minimal() 
+p + stat_cor(label.x = 0.2, label.y = 0.7, p.accuracy = 0.001, r.digits = 2) 
+```
+```{r,fig.width=5, fig.height=2.2}
+p <- ggplot(long%>%filter(IDH=="IDH-mutant"),aes(mRNA, methylation)) +
+  geom_point(aes(group=region, color=region), size=1.2) +
+  stat_smooth(aes(group=region), method = "lm", level=0.95) + theme_minimal()  +
+  facet_wrap(~region) +
+  scale_color_manual(values=palette) +
+  theme(strip.text.x = element_blank()) 
+p + stat_cor(label.x = 0, label.y = 1, p.accuracy = 0.001, r.digits = 2) 
+```
+
+Regression model without interaction; IDH-mutant cells:
+
+```{r}
+model <- lm(mRNA ~ promoter+body, data = wide %>% filter(IDH=="IDH-mutant"))
+summary(model)
+```
+
+Regression model with interaction; IDH-mutant cells:
+
+```{r}
+model <- lm(mRNA ~ promoter*body, data = wide %>% filter(IDH=="IDH-mutant"))
+summary(model)
+```
+
+
+
+### Carmustine sensitivity and associations with levels of regulation of MGMT
+
+This part focuses on the eleven cell lines that were tested for response to carmustine. 
+
+```{r}
+resistant <- pheno %>% filter(carmustine_response=="resistant") %>% dplyr::pull(sample)
+sensitive <- pheno %>% filter(carmustine_response=="sensitive") %>% dplyr::pull(sample)
+
+palette3 <- viridis::turbo(2, begin =0.15, end = 0.9, direction = 1)
+palette3 <- c(palette3[2],viridis::viridis(1),palette3[1])
+response.order <-  pheno %>% filter(carmustine_tested) %>% arrange(carmustine_resistance_order) %>% dplyr::pull(sample)
+
+response.palette <- viridis::turbo(length(response.order), begin =0.15, end = 0.9, direction = -1)
+names(response.palette) <- response.order
+
+#response.order.filtered <- which(response.order %in% c(resistant, sensitive))
+#response.palette.filtered <- response.palette[response.order.filtered]
+#response.order.filtered <- response.order[response.order.filtered]
+#names(response.palette.filtered) <- response.order.filtered
+```
+
+#### Carmustine IC50 estimates and dose response curves
+
+```{r}
+ic.df <- readr::read_csv(file.path(data_dir, "Cellline_Carmustine_IC50.csv")) # %>% mutate(dose=dose+0.1)
+# untreated at 0
+nodose <- 0
+
+ic.df <- ic.df %>% group_by(sample) %>% 
+  group_modify(function(x, y) x %>% 
+                 mutate(response = 100*response/(mean((x%>%filter(dose==nodose))$response, na.rm=TRUE))))
+m <- drm(response~dose, fct=LL.4(), 
+         data=ic.df %>% mutate(dose=dose+0.1), 
+         type="continuous", curveid=sample, na.action = na.omit)
+EDs <- ED(m, respLev=c(50), clevel = NULL, interval="delta", display=TRUE)
+EDs <- EDs %>% bind_cols(sample=sapply(rownames(EDs), function(x) unname(gsub("e:","",unname(gsub(":50","",x))))))
+
+pheno <- pheno %>% left_join(EDs %>% transmute(sample, IC50=round(Estimate,1)))
+ic.df <- ic.df %>% left_join(pheno) %>%
+  mutate(`response group`=factor(carmustine_response, levels=c('sensitive', 'intermediate', 'resistant')))
+```
+
+```{r, fig.width=8, fig.height=2.2}
+p<-ggplot(ic.df %>% mutate(cell=factor(sample, levels = response.order)), aes(x=dose,y=response))+ 
+  geom_point(size=0.8, color="darkgray")+ 
+  theme_minimal() +
+  xlab("carmustine dose (microMol)")+
+  ylab("viability (%)") 
+
+p + stat_smooth(aes(shape=cell, color=cell), method=drm,se=FALSE,method.args = list(fct = L.4(), na.action = na.omit)) +
+  scale_color_manual(values=response.palette) +
+  facet_wrap(~`response group`) + guides(color=guide_legend(ncol=3)) 
+```
+```{r, fig.width=3, fig.height=2.2}
+p <- ggplot(wide %>% filter(sample%in%cells),aes(promoter, body)) +
+  geom_point() +
+  stat_smooth(method = "lm", level=0.95) + 
+  theme_minimal() 
+p + stat_cor(label.x = 0.25, label.y = 0.95, p.accuracy = 0.001, r.digits = 2) 
+```
+```{r,fig.width=5, fig.height=2.2}
+p <- ggplot(long%>% filter(sample%in%cells),aes(mRNA, methylation)) +
+  geom_point(aes(group=region, color=region)) +
+  stat_smooth(aes(group=region), method = "lm", level=0.95) + theme_minimal()  +
+  facet_wrap(~region) +
+  scale_color_manual(values=palette) +
+  theme(strip.text.x = element_blank()) 
+p + stat_cor(label.x = 0, label.y = 1, p.accuracy = 0.001, r.digits = 2) 
+```
+
+Regression without interaction: 
+
+```{r}
+model <- lm(mRNA ~ promoter+body, data = wide %>% filter(sample%in%cells))
+summary(model)
+```
+
+Regression with interaction:
+```{r}
+model <- lm(mRNA ~ promoter*body, data = wide %>% filter(sample%in%cells))
+summary(model)
+```
+### Protein data
+
+#### Passage, Dose, and Time response
+
+```{r}
+protein.time.df <- read_csv(file.path(data_dir, "Cellline_MGMT_protein_time.csv"))
+protein.dose.df <- read_csv(file.path(data_dir, "Cellline_MGMT_protein_dose.csv"))
+protein.passage.df <- read_csv(file.path(data_dir, "Cellline_MGMT_protein_passage.csv"))
+```
+
+```{r, fig.width=3, fig.height=2.2}
+protein.passage <- protein.passage.df %>% group_by(sample, passage) %>% dplyr::summarize(SD=sd(MGMT), MGMT=mean(MGMT)) %>%mutate(`response group`=factor(ifelse(sample%in%sensitive, "sensitive", ifelse(sample%in%resistant, "resistant", "intermediate")), levels=c('sensitive', 'intermediate', 'resistant')), passage=factor(passage, levels=c("early", "middle", "late")))
+p<- ggplot(protein.passage %>% mutate(cell=factor(sample, levels=response.order)), aes(x=passage, y=MGMT, group=cell, color=cell)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=MGMT-SD, ymax=MGMT+SD), width=1,
+                position=position_dodge(0.05)) +
+  #facet_wrap(~`response group`) +
+  theme_minimal() +
+  ylab("protein") +
+  theme(legend.position='left') +
+  scale_color_manual(values=response.palette)
+p
+# transforming to MGMT:GAPDH
+protein.dose <- protein.dose.df %>% rowwise() %>% mutate(MGMT=MGMT/GAPDH)
+protein.dose <- protein.dose %>% group_by(sample, dose) %>% dplyr::summarize(SD=sd(MGMT), MGMT=mean(MGMT)) %>%mutate(`response group`=factor(ifelse(sample%in%sensitive, "sensitive", ifelse(sample%in%resistant, "resistant", "intermediate")), levels=c('sensitive', 'intermediate', 'resistant')))
+
+p<- ggplot(protein.dose %>% mutate(cell=factor(sample, levels=response.order)), aes(x=dose, y=MGMT, group=cell, color=cell)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=MGMT-SD, ymax=MGMT+SD), width=1,
+                position=position_dodge(0.05)) +
+  #facet_wrap(~`response group`) +
+  theme_minimal() +
+  ylab("protein") +
+  theme(legend.position='left') +
+  scale_color_manual(values=response.palette)
+p
+
+protein.time <- protein.time.df %>% rowwise() %>% mutate(MGMT=MGMT/GAPDH)
+protein.time <- protein.time %>% group_by(sample, time) %>% dplyr::summarize(SD=sd(MGMT), MGMT=mean(MGMT)) %>%mutate(`response group`=factor(ifelse(sample%in%sensitive, "sensitive", ifelse(sample%in%resistant, "resistant", "intermediate")), levels=c('sensitive', 'intermediate', 'resistant')))
+
+p<- ggplot(protein.time %>% mutate(cell=factor(sample, levels=response.order)), aes(x=time, y=MGMT, group=cell, color=cell)) + 
+  geom_line() +
+  geom_point()+
+  geom_errorbar(aes(ymin=MGMT-SD, ymax=MGMT+SD), width=1,
+                position=position_dodge(0.05)) +
+  #facet_wrap(~`response group`) +
+  theme_minimal() +
+  ylab("protein") +
+  theme(legend.position='left') +
+  scale_color_manual(values=response.palette)
+p
+```
+
+### All vs all correlations
+
+```{r,fig.width=3, fig.height=2.5}
+wide <- wide %>% filter(sample%in%cells) %>% left_join(pheno %>% dplyr::select(-c(MGMT_mRNA, IDH_status)))
+long <- long %>% filter(sample%in%cells)
+```
+
+```{r, fig.width=4.5, fig.height=3.5}
+library(Hmisc)
+all.cor.cells <- wide%>%left_join(protein.dose%>%filter(dose==0) %>% transmute(sample, protein=MGMT)) %>% transmute(`promoter methylation`=promoter, `body methylation`=body, mRNA, protein, IC50)
+all.cors <- cor(as.matrix(all.cor.cells[,3:ncol(all.cor.cells)]), use="pairwise.complete.obs")
+all.ps <- rcorr(as.matrix(all.cor.cells[,3:ncol(all.cor.cells)]))$P
+get_lower_tri<-function(cormat){
+  cormat[upper.tri(cormat)] <- NA
+  return(cormat)
+}
+# Get upper triangle of the correlation matrix
+get_upper_tri <- function(cormat){
+  cormat[lower.tri(cormat)]<- NA
+  return(cormat)
+}
+
+upper_tri <- get_upper_tri(all.cors)
+melted_cormat <- bind_cols(key1=rownames(upper_tri), upper_tri) %>% pivot_longer(!key1, names_to = "key2", values_to = "cor") %>% filter(!is.na(cor) & !(cor == 1)) %>% transmute(key1=factor(key1, levels=c("promoter methylation", "body methylation", "mRNA", "protein","IC50")), key2=factor(key2, levels=c("IC50", "protein","mRNA", "body methylation","promoter methylation")), cor)
+
+p <- ggplot(data = melted_cormat, aes(key1, key2, fill = cor))+
+  geom_tile(color = "white")+
+  geom_text(aes(key1, key2, label = round(cor,2)), color = "black", size = 4) +
+  scale_fill_gradient2(low = palette3[3], high = palette3[1], mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="correlation") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 25, vjust = 1, size=12, 
+                                   hjust = 1), 
+        axis.text.y = element_text(size=12)) +#, legend.direction = "horizontal",legend.justification = c(1, 0),legend.position = c(1.0, 0.75),)+ 
+  xlab("") + ylab("") +
+  coord_fixed()
+p
+
+upper_tri <- get_upper_tri(all.ps)
+melted_cormat <- bind_cols(key1=rownames(upper_tri), upper_tri) %>% pivot_longer(!key1, names_to = "key2", values_to = "cor") %>% filter(!is.na(cor)) %>% transmute(key1=factor(key1, levels=c("promoter methylation", "body methylation", "mRNA", "protein","IC50")), key2=factor(key2, levels=c("IC50", "protein","mRNA", "body methylation","promoter methylation")), cor)
+
+p <- ggplot(data = melted_cormat, aes(key1, key2, fill = cor))+
+  geom_tile(color = "white")+
+  geom_text(aes(key1, key2, label = round(cor,2)), color = "black", size = 4) +
+  scale_fill_gradient2(low = palette3[3], high = palette3[1], mid = "white", 
+                       midpoint = 0.1, limit = c(0,1), space = "Lab", 
+                       name="p-value") +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 25, vjust = 1, size=12, 
+                                   hjust = 1), 
+        axis.text.y = element_text(size=12)) +# legend.direction = "horizontal",legend.justification = c(1, 0), legend.position = c(1.0, 0.75),)+ 
+  xlab("") + ylab("") +
+  coord_fixed()
+p
+```
+
+### Regression models
+
+#### IC50 versus methylation
+
+Without interaction: 
+
+```{r}
+model <- lm(IC50 ~ promoter+body, data = wide)
+summary(model)
+```
+
+With interaction: 
+
+```{r}
+model <- lm(IC50 ~ promoter*body, data = wide)
+summary(model)
+```
+
+#### Protein versus methylation
+
+```{r}
+wide <- wide %>%left_join(protein.dose%>%filter(dose==0) %>% dplyr::select(sample, MGMT)) %>%  mutate(protein=ifelse(is.na(MGMT),0,MGMT))
+```
+
+```{r}
+model <- lm(protein ~ promoter+body, data = wide)
+summary(model)
+
+model <- lm(protein ~ promoter*body, data = wide)
+summary(model)
+```
+
+```{r, fig.width=5.5, fig.height=2.2}
+max.ic50 <- max(wide$IC50)
+### this produces with relative (normalized to the max IC50) IC50, so as to bring the display in comparable scale to the other measures
+df <- wide %>% ungroup() %>% transmute(sample=factor(sample, levels=rev(response.order)),
+                        `relative\nIC50`=IC50/max.ic50, `promoter\nmethylation`=promoter, 
+                        `body\nmethylation`=body, mRNA, protein)
+df <- df %>% pivot_longer(!sample, values_to="value", names_to="dimension") %>%
+              mutate(dimension=factor(dimension, levels=c("relative\nIC50", "promoter\nmethylation", "body\nmethylation", "mRNA", "protein"))) %>% filter(!is.na(dimension))
+p <- ggplot(df, aes(x=value,y=sample)) +
+  scale_x_continuous(breaks = c(0,1)) + 
+  geom_bar(stat="identity", aes(fill=sample),width = 0.6) + theme_minimal() +
+  theme(axis.text=element_text(size=8), axis.title.x=element_text(size=10)) + 
+  scale_fill_manual(values=response.palette) +
+  ylab("") + guides(fill="none") +
+  facet_wrap(~dimension, ncol=6)
+p
+
+### this produces with absolute IC50, but because of the differences in scale does not show well
+df <- wide %>% ungroup() %>% transmute(sample=factor(sample, levels=rev(response.order)),
+                        IC50, `promoter\nmethylation`=promoter, 
+                        `body\nmethylation`=body, mRNA, protein)
+df <- df %>% pivot_longer(!sample, values_to="value", names_to="dimension") %>%
+              mutate(dimension=factor(dimension, levels=c("IC50", "promoter\nmethylation", "body\nmethylation", "mRNA", "protein"))) %>% filter(!is.na(dimension))
+
+p <- ggplot(df, aes(x=value,y=sample)) +
+  geom_bar(stat="identity", aes(fill=sample),width = 0.6) + theme_minimal() +
+  theme(axis.text=element_text(size=8), axis.title.x=element_text(size=10)) + 
+  scale_fill_manual(values=response.palette) +
+  ylab("") + guides(fill="none") +
+  facet_wrap(~dimension, ncol=6)
+#p
+```
+
+#### Trying ANOVA to check passage/dose/time significance on protein production
+
+
+* First check assumptions:
+  + Inspect outliers
+  + Check normality assumption, where p > 0.05 in Shapiro indicates assumption is satisfied
+* Perform ANOVA
+* Visualize
+
+##### Passage
+
+```{r, fig.width=1.6, fig.height=2}
+library(rstatix)
+p <- ggplot(protein.passage, aes(x = as.factor(passage), y = MGMT)) + 
+  geom_boxplot(color="steelblue3") + theme_minimal() + xlab("passage") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("protein")
+#p
+
+protein.passage %>% group_by(passage) %>%
+  identify_outliers(MGMT)
+
+protein.aov.df <- protein.passage %>% transmute(cell=as.factor(sample), passage, MGMT=MGMT) %>% ungroup() 
+
+protein.passage %>%
+  group_by(passage) %>%
+  shapiro_test(MGMT)
+
+res.aov <- protein.aov.df %>% anova_test(dv=MGMT, wid=cell, within=passage)
+
+get_anova_table(res.aov)
+
+pwc <- protein.aov.df %>%
+  pairwise_t_test(
+    MGMT ~ passage, paired = TRUE,
+    p.adjust.method = "none"
+    )
+pwc <- pwc %>% add_xy_position(x = "passage")
+
+pwc
+p + stat_pvalue_manual(pwc, tip.length=0, hide.ns=TRUE)
+```
+
+##### Dose
+
+For dose MGG119 is an extreme outlier and leads to non-normal dose points:
+
+```{r}
+protein.dose %>% 
+  group_by(dose) %>%
+  shapiro_test(MGMT)
+
+protein.dose %>% group_by(dose) %>%
+  identify_outliers(MGMT)
+```
+
+It is hence removed from the dose analysis. NHA is included in ANOVA but excluded from post-hoc tests due to incompleteness of doses. 
+
+```{r, fig.width=1.9, fig.height=2}
+p <- ggplot(protein.dose %>% filter(!sample%in%c("MGG119")), aes(x = as.factor(dose), y = MGMT)) + 
+  geom_boxplot(color="steelblue3") + theme_minimal() + xlab("dose") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("protein")
+#p
+
+protein.dose %>% filter(!sample%in%c("MGG119")) %>%
+  group_by(dose) %>%
+  shapiro_test(MGMT)
+
+protein.aov.df <- protein.dose %>% filter(!sample%in%c("MGG119")) %>% transmute(cell=as.factor(sample), dose=as.factor(dose), MGMT=MGMT) %>% ungroup() 
+
+res.aov <- protein.aov.df %>% anova_test(dv=MGMT, wid=cell, within=dose)
+
+get_anova_table(res.aov)
+
+pwc <- protein.aov.df %>% filter(!cell %in% c("NHA")) %>%
+  pairwise_t_test(
+    MGMT ~ dose, paired = TRUE,
+    p.adjust.method = "none"
+    )
+pwc <- pwc %>% add_xy_position(x = "dose")
+pwc
+p + 
+  stat_pvalue_manual(pwc, tip.length=0, hide.ns=TRUE)
+```
+
+
+##### Time
+
+```{r, fig.width=1.8, fig.height=2.2}
+protein.time %>% 
+  group_by(time) %>%
+  get_summary_stats(MGMT, type = "mean_sd")
+
+p <- ggplot(protein.time, aes(x = as.factor(time), y = MGMT)) + 
+  geom_boxplot(color="steelblue3") + theme_minimal() + xlab("time (hrs)") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ylab("protein")
+#p
+
+#outliers
+protein.time %>% group_by(time) %>%
+  identify_outliers(MGMT)
+#normality assumption
+protein.time %>%
+  group_by(time) %>%
+  shapiro_test(MGMT)
+
+protein.aov.df <- protein.time %>% transmute(cell=as.factor(sample), time=as.factor(time), MGMT=MGMT) %>% ungroup() 
+
+res.aov <- protein.aov.df %>% anova_test(dv=MGMT, wid=cell, within=time)
+get_anova_table(res.aov)
+
+# not adjusting but for multiple tests here
+pwc <- protein.aov.df %>%
+  pairwise_t_test(
+    MGMT ~ time, paired = TRUE,
+    p.adjust.method = "none"
+    )
+pwc
+
+pwc <- pwc %>% add_xy_position(x = "time")
+p + stat_pvalue_manual(pwc, tip.length=0, hide.ns=TRUE)
+```
+
+```{r}
+sessionInfo()
+```
