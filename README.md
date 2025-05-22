@@ -1,4 +1,4 @@
-# MGMT Gene Methylation Modulates Response to DNA Alkylating Agents in Glioma
+# Total MGMT Gene Methylation Modulates Response to DNA Alkylating Agents in Glioma
  
 Data and accompanying code supporting Briceno et al. (to appear):
 
